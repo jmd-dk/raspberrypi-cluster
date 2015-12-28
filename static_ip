@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+
+# This script will assign static IP addresses
+# to all Raspberry Pi's on the local network.
+
+
+#################
+# Initial setup #
+#################
+export ppid=${PPID} start_msg="assigns static IP addresses and new hostnames
+to Raspberry Pi's on the local network"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/environment"
+
+
+
+###################
+# Input arguments #
+###################
+# The '--accurate' argument
+timing_template="-T3"
+for var in "${@}"; do
+    if [ "${var}" == "--accurate" ]; then
+        timing_template="-T2"
+    fi
+done
+
+
+
+#########################################
+# Find all devices on the local network #
+#########################################
+# Find IP addresses of all devices on the local network
+echo "
+Searching for all devices on the local network ..."
+local_ip=$(hostname -I | awk '{print $1}')
+nmap_output="$(nmap -v ${timing_template} -sn ${local_ip%.*}.\* | grep -v --line-buffered "host down" | tee "/dev/tty")"
+ips_all="$(echo "${nmap_output}" | awk '{print $NF}' | grep "${local_ip%.*}" | sort -u)"
+
+
+
+##################################################
+# Locate all Raspberry Pi's on the local network #
+##################################################
+"${this_dir}/locate" ${1} "${ips_all}" | tee "locate_output"
+if [ ${PIPESTATUS[0]} != 0 ]; then
+    trap : 0
+    exit 1
+fi
+ips_pi=""
+while read line; do
+    if echo "${line}" | grep -i "succesfully" >/dev/null 2>&1; then
+        break
+    fi
+    if [ -z "${ips_pi}" ]; then
+        ips_pi=${line}
+    else
+        ips_pi="$(printf "${line}\n${ips_pi}")"
+    fi
+done <<< "$(tac "locate_output")"
+N_devices="$(echo "${ips_pi}" | wc -l)"
+if [ ${N_devices} == 1 ]; then
+    echo "
+The following Raspberry Pi will be assigned
+a static IP address and a new hostname:"
+else
+    echo "
+The following ${N_devices} Raspberry Pi's will be
+assigned static IP addresses and new hostnames:"
+fi
+printf "${esc_bold}${ips_pi}${esc_normal}\n"
+sleep 5
+
+
+
+###################################
+# Find available IP address range #
+###################################
+# Preferable start of Raspberry Pi IP address range
+ip_range_start=100
+# Base hostname. The hostnames will be ${hostbasename}0, ${hostbasename}1, ... 
+hostbasename="raspberrypi"
+# Compute allowable range of Raspberry Pi IP addresses
+echo "
+Computing allowable range of Raspberry Pi IP addresses ..."
+set_difference()
+{
+    args="$(echo "$1 $2 $2" | xargs)"
+    echo "${args// /$'\n'}" | sort | uniq -u
+}
+ips_not_pi="$(set_difference "${ips_all}" "${ips_pi}")"
+count=1
+while [ ${count} -lt 253 ]; do
+    ip_end=${ip_range_start}
+    # Construct list of static IP addresses
+    static_ips=${local_ip%.*}.${ip_end}
+    n=1
+    range_found="yes"
+    while [ ${n} -lt ${N_devices} ]; do
+        ((n += 1))
+        ((ip_end += 1))
+        # Check for too high IP addresses
+        if [ ${ip_end} == 255 ]; then
+            range_found="no"
+            break
+        fi
+        static_ips="$(printf "${static_ips}\n${local_ip%.*}.${ip_end}")"
+    done
+    # Test for occupied IP addresses
+    difference="$(set_difference "${ips_not_pi}" "${static_ips}")"
+    if [ "${range_found}" == "yes" ] && [ "${difference}" == "${ips_not_pi}" ]; then
+        # No overlap
+        break
+    fi
+    ((count += 1))
+    if [ ${count} == 253 ]; then
+        # Not enough free IP addresses
+        error "Could not find ${N_devices} available IP addresses
+in continuation of each other in ${local_ip%.*}.*"
+        exit 1
+    fi
+    ((ip_range_start += 1))
+    if [ ${ip_range_start} == 255 ]; then
+        ip_range_start=2
+    fi
+done
+# Message about IP and hostname transformations
+echo "The following changes will now be performed:"
+for ((count = 0; count < ${N_devices}; count += 1)); do
+    ((linenr = count + 1))
+    ip_old="$(echo "${ips_pi}"     | sed "${linenr}q;d")"
+    ip_new="$(echo "${static_ips}" | sed "${linenr}q;d")"
+    printf "${ip_old} ${esc_rightarrow} ${esc_bold}${ip_new}${esc_normal}, hostname=${hostbasename}${count}\n"
+done
+sleep 5
+
+
+
+#############################################################
+# Loop over each located Raspberry Pi and apply the changes #
+#############################################################
+n_ip=0
+all_success="yes"
+for ip in ${ips_pi}; do
+    hostname="${hostbasename}${n_ip}"
+    ((n_ip += 1))
+    static_ip="$(echo "${static_ips}" | sed "${n_ip}q;d")"
+
+    execute_on_pi "${ip}" '
+    # Change hostname
+    hostname_current="$(hostname)"
+    printf "\nChanging hostname from '\''${hostname_current}'\'' to '\'"${esc_bold}${hostname}${esc_normal}"\'' ...\n"
+    sudo sed -i "s/${hostname_current}/'"${hostname}"'/g" "/etc/hosts"
+    sudo sed -i "s/${hostname_current}/'"${hostname}"'/g" "/etc/hostname"
+    sudo "/etc/init.d/hostname.sh"
+
+    # Apply static IP address
+    printf "\nApplying the static IP address '${esc_bold}${static_ip}${esc_normal}' ...\n"
+    routers="$(netstat -nr | sed -n '\''3p'\'' | awk '\''{print $2}'\'')"
+    name_servers="$(grep "nameserver" "/etc/resolv.conf" | awk '\''{print $2}'\'' | xargs)"
+    sudo printf "\n# Static IP address\ninterface eth0
+    static ip_address='${static_ip}'
+    static routers=${routers}
+    static domain_name_servers=${name_servers}\n" >> "/etc/dhcpcd.conf"
+
+    # Need to reboot
+    printf "\nRebooting the Raspberry Pi ...\t\n"  # The tab signals succcess
+    sleep 1
+    sudo shutdown -r now
+    '
+    if [ "${execute_on_pi_success}" == "no" ]; then
+        all_success="no"
+    fi
+done
+
+
+
+###########################
+# Check up on the changes #
+###########################
+printf "\nChecks whether the changes have been applied ...\n"
+sleep 10
+n_ip=0
+for ip in ${ips_pi}; do
+    hostname="${hostbasename}${n_ip}"
+    ((n_ip += 1))
+    static_ip="$(echo "${static_ips}" | sed "${n_ip}q;d")"
+
+    # Wait for the Raspberry Pi with IP ${static_ip} to reappear on the local network
+    wait_pi_online "${static_ip}"
+
+    # Log onto the Raspberry Pi with IP ${static_ip} and check whether its hostname is correct
+    execute_on_pi "${static_ip}" '
+    hostname="$(hostname)"
+    success="yes"
+    [ "${hostname}" == '"${hostname}"' ] || success="no"
+    [ "${success}" == "no"  ] || printf "\nRaspberry Pi '"${static_ip}"' have the correct hostname '\''${hostname}'\''\n"
+    [ "${success}" == "yes" ] || printf "\nError: Raspberry Pi '"${static_ip}"' have the hostname '\''${hostname}'\'' but should have '\'"${hostname}"\''\n"
+
+    # Log out of the Raspberry Pi
+    [ "${success}" == "no"  ] || printf "\nLogging out of the Raspberry Pi ...\t\n"  # The tab signals succcess
+    [ "${success}" == "yes" ] || printf "\nLogging out of the Raspberry Pi ...\n"
+    sleep 1
+    exit 0
+    '
+    if [ "${execute_on_pi_success}" == "no" ]; then
+        all_success="no"
+    fi
+done
+
+
+
+########
+# Exit #
+########
+if [ "${all_success}" == "yes" ]; then
+    printf "\n${esc_bold}${esc_green}Succesfully assigned static IP addresses and hostnames
+to all Raspberry Pi's on the local network.${esc_normal}\n"
+else
+    printf "\nDone assigning static IP addresses and hostnames
+to all Raspberry Pi's on the local network.\n"
+    error "Note that some errors did occur"
+    exit 1
+fi
+
+# Exit gracefully
+trap : 0
+

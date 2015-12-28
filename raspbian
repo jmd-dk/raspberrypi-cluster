@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+
+# This script will download the latest Raspbian
+# image and write it to an SD card.
+
+
+#################
+# Initial setup #
+#################
+export ppid=${PPID} start_msg="downloads the latest Raspbian
+image and writes it to an SD card"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/environment"
+
+
+
+###################
+# Input arguments #
+###################
+# The SD device may be given as the first argument
+disk="${1}"
+
+
+
+###########################################################
+# Begin downloading the newest Raspbian in the background #
+###########################################################
+url="https://downloads.raspberrypi.org/raspbian_latest"
+echo "
+Starting background download of the latest Raspbian,"
+
+# Function which checks the connection to the internet
+check_internet_connection()
+{
+    online="yes"
+    if ! ping -w 5 -c 1 "www.google.com" > /dev/null 2>&1; then
+        online="no"
+        error "No connection to the internet"
+    fi
+}
+
+# Get the filename of the latest Raspbian image
+for i in {60..1}; do
+    check_internet_connection
+    if [ "${online}" == "yes" ]; then
+        # Online. Get filename.
+        wget_output="$(wget --no-check-certificate --trust-server-names --spider "${url}" 2>&1 || :)"
+        download_filename="$(basename "$(echo "${wget_output}" | grep -o "[^ ]*\.zip" | head -n 1)")"
+        if [ -z "${download_filename}" ]; then
+            # Broken URL
+            error "This URL seems to be broken:\n${url}"
+        else
+            # Success
+            break
+        fi
+    fi
+    if [ ${i} == 1 ]; then
+        # Definitely offline. Quit.
+        error "Giving up background download of the latest Raspbian"
+        trap : 0
+        exit 1
+    fi
+    sleep 10
+done
+
+# Print out the name of the latest Raspbian version
+raspbian_name="$(echo "${download_filename}" | grep -o raspbian-[[:alpha:]]*)"
+raspbian_name="$(echo "${raspbian_name/-/ }")"
+raspbian_name="$(python3 -c "print('${raspbian_name}'.title())")"
+raspbian_date="$(echo "${download_filename}" | grep -o "[[:digit:]]*-[[:digit:]]*-[[:digit:]]*")"
+printf "${esc_bold}${raspbian_name}${esc_normal}, ${esc_bold}${raspbian_date}${esc_normal} ...\n"
+
+# Get sha1sum from the web
+wget_output="$(wget -q -O- --no-check-certificate "${url}.sha1" 2>&1 || :)"
+sha1_official="$(echo "$wget_output" | awk '{print $1}')"
+
+# Begin downloading in background
+wget_background_output="$(wget -b -t 100 --timeout 15 -c --no-check-certificate --trust-server-names "${url}")"
+wget_background_pid="$(echo "${wget_background_output}" | grep -o "pid [[:digit:]]*" | awk '{print $2}')"
+download_complete="no"
+sleep 2
+if ps -p ${wget_background_pid} -o comm= > /dev/null 2>&1; then
+    # Continue downloading in the background. Save the pid in
+    # the ${pids_kill} variable to make sure it will be killed on exit.
+    if [ -z "${pids_kill}" ]; then
+        pids_kill=${wget_background_pid}
+    else
+        pids_kill="$(printf "${pids_kill}\n${wget_background_pid}")"
+    fi
+else
+    # Download complete
+    download_complete="yes"
+    echo "    The file has already been fully retrieved"
+fi
+
+
+
+##################
+# Locate SD card #
+##################
+if [ -z "${disk}" ]; then
+    locate_SD_device  # Now, ${disk} is the SD card device
+fi
+
+
+####################################
+# Finish the download in the front #
+####################################
+# Kill the background download process silently
+if [ "${download_complete}" == "no" ]; then
+    exec 3>&2; exec 2> /dev/null; kill -SIGKILL ${wget_background_pid} >/dev/null 2>&1 || :; sleep 0.1; exec 2>&3; exec 3>&-
+fi
+
+# Filter used to supress all output from wget except the progress bar
+progress_filter()
+{
+    local flag=false c count cr=$'\r' nl=$'\n'
+    while IFS='' read -d '' -rn 1 c; do
+        if ${flag}; then
+            printf '%c' "$c"
+        else
+            if [[ $c != $cr && $c != $nl ]]; then
+                count=0
+            else
+                ((count += 1))
+                if ((count > 1)); then
+                    flag=true
+                fi
+            fi
+        fi
+    done
+}
+# Function for downloading the latest Raspbian image
+download_raspbian()
+{
+    for n in {1..50}; do
+        wget -t 1 --timeout 15 -c --no-check-certificate --trust-server-names --progress=bar:force "${url}" 2>&1 | progress_filter || :
+        wget_exit_status="${PIPESTATUS[0]}"
+        if [ ${wget_exit_status} == 0 ]; then
+            break
+        fi
+        check_internet_connection
+        echo "Attempting to reconnect ..."
+        sleep 10
+    done
+}
+
+# Continue downloading the latest Raspbian
+if [ "${download_complete}" == "no" ]; then
+    printf "
+Finishing download of ${raspbian_name} ...\n"
+    download_raspbian
+fi
+
+# Compute and compare sha1sums
+for i in {10..1}; do
+    printf "
+Checking integrity of download ..."
+    sha1_download="$(sha1sum "${download_filename}" | awk '{print $1}')"
+    if [ "${sha1_official}" == "${sha1_download}" ]; then
+        # Agreement between sha1sums
+        echo " Verified"
+        break
+    else
+        # Disagreement between sha1sums
+        error " Failed!"
+        echo "Download sha1: ${sha1_download}"
+        echo "Official sha1: ${sha1_official}"
+        # If this is the last try, exit with an error
+        if [ ${i} == 1 ]; then
+            error "Giving up on downloading \"${download_filename}\" from ${url}"
+            trap : 0
+            exit 1
+        fi
+        # Recompute sha1sum
+        echo "Redo check ..."
+        sha1_download2="$(sha1sum "${download_filename}" | awk '{print $1}')"
+        if [ "${sha1_download}" == "${sha1_download2}" ]; then
+            # Initial check correct, but corrupt download
+            echo "Corrupt download. Need to start over ..."
+            rm -f "${download_filename}"
+            download_raspbian
+        elif [ "${sha1_official}" == "${sha1_download2}" ]; then
+            # Initial check incorrect, download is really all right
+            echo "Download sha1 (second computation): ${sha1_download2}"
+            echo "Something went wrong with the initial sha1 computation;
+the downloaded image is really all right!"
+            break
+        else
+            # Unstable checksum computation
+            echo "Download sha1 (second computation): ${sha1_download}"
+            echo "Checksum computation is unstable for \"${download_filename}\"."
+            echo "This can e.g. be due to bad sectors on the disk."
+            echo "The corrupt image file will be kept on the disk,
+while the image will be re-downloaded ..."
+            mv "${download_filename}" "corrupt_raspbian.zip"
+            download_raspbian
+        fi
+    fi
+done
+rm -f "corrupt_raspbian.zip"
+
+
+
+########################
+# Extract the download #
+########################
+image_filename="$(unzip -l "${download_filename}" | awk '{print $NF}' | head -n 4 | tail -n 1)"
+echo "
+Uncompressing ${raspbian_name} archive to \"${image_filename}\" ..."
+image_size_supposed=$(zipinfo "${download_filename}" | grep -o "1 file, [[:digit:]]*" | awk '{print $NF}')
+if [ -f "${image_filename}" ]; then
+    # Uncompressed image already exists. Do size check.
+    image_size="$(stat -c %s "${image_filename}")"
+    if [ ${image_size} == ${image_size_supposed} ]; then
+        echo "    The image has already been uncompressed"
+    else
+        # An uncompressed image with the correct file name alreay exists,
+        # but its size does not match. Uncompress to overwrite the image.
+        unzip -p "${download_filename}" | pv --size ${image_size_supposed} > "${image_filename}"
+    fi
+else
+    # Uncompressed image does not exist yet. Get it.
+    unzip -p "${download_filename}" | pv --size ${image_size_supposed} > "${image_filename}"
+fi
+
+
+
+##########################
+# Write image to SD card #
+##########################
+SD "w" "${disk}" "${image_filename}"
+
+
+
+########
+# Exit #
+########
+printf "
+${esc_bold}${esc_green}Succesfully written ${raspbian_name} to SD card.
+You may now remove the SD card from the computer.${esc_normal}
+"
+
+# Exit gracefully
+trap : 0
+

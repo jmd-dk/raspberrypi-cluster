@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+
+# This script will change the default password for the pi user and
+# create additional users on all Raspberry Pi's on the local network.
+
+
+#################
+# Initial setup #
+#################
+export ppid=${PPID} start_msg="changes the default password for the pi user and
+create additional users on Raspberry Pi's on the local network"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/environment"
+
+
+
+###################################
+# Prompt the user for information #
+###################################
+# The pi user password
+while :; do
+    read -t 0.1 -n 10000 discard || :
+    italic "Type new password for the pi user: "
+    read -s pi_password
+    echo
+    if [ -z "${pi_password}" ]; then
+        error "You must write a password"
+        continue
+    fi
+    read -t 0.1 -n 10000 discard || :
+    italic "Retype new password: "
+    read -s pi_password2
+    echo
+    if [ "${pi_password}" != "${pi_password2}" ]; then
+        error "Mismatch between entered passwords"
+    else
+        break
+    fi
+done
+# New users
+usernames=""
+passwords=""
+N_new_users=0
+while :; do
+    read -t 0.1 -n 10000 discard || :
+    italic "Do you wish to add a new user? [y/N] "
+    read yn
+    if [[ "${yn}" == "y"* ]] || [[ "${yn}" == "Y"* ]]; then
+        # Type in username
+        while :; do
+            read -t 0.1 -n 10000 discard || :
+            italic "Enter username: "
+            read username
+            if [ -n "${username}" ]; then
+                ((N_new_users += 1))
+                break
+            fi
+        done
+        if [ -z "${usernames}" ]; then
+            usernames="${username}"
+        else
+            usernames="$(printf "${usernames}\n${username}")"
+        fi
+        # Type in password
+        while :; do
+            read -t 0.1 -n 10000 discard || :
+            italic "Enter password: "
+            read -s password
+            echo
+            if [ -z "${password}" ]; then
+                error "You must write a password"
+                continue
+            fi
+            read -t 0.1 -n 10000 discard || :
+            italic "Retype password: "
+            read -s password2
+            echo
+            if [ "${password}" != "${password2}" ]; then
+                error "Mismatch between entered passwords"
+            else
+                break
+            fi
+        done
+        if [ -z "${passwords}" ]; then
+            passwords="${password}"
+        else
+            passwords="$(printf "${passwords}\n${password}")"
+        fi
+    else
+        break
+    fi
+done
+
+
+
+##################################################
+# Locate all Raspberry Pi's on the local network #
+##################################################
+"${this_dir}/locate" "${@}" | tee "locate_output"
+if [ ${PIPESTATUS[0]} != 0 ]; then
+    trap : 0
+    exit 1
+fi
+ips_pi=""
+while read line; do
+    if echo "${line}" | grep -i "succesfully" >/dev/null 2>&1; then
+        break
+    fi
+    if [ -z "${ips_pi}" ]; then
+        ips_pi=${line}
+    else
+        ips_pi="$(printf "${line}\n${ips_pi}")"
+    fi
+done <<< "$(tac "locate_output")"
+N_devices="$(echo "${ips_pi}" | wc -l)"
+if [ ${N_devices} == 1 ]; then
+    echo "
+The following Raspberry Pi will be assigned
+a static IP address and a new hostname:"
+else
+    echo "
+The following ${N_devices} Raspberry Pi's will be
+assigned static IP addresses and new hostnames:"
+fi
+printf "${esc_bold}${ips_pi}${esc_normal}\n"
+sleep 5
+
+
+
+#############################################################
+# Loop over each located Raspberry Pi and apply the changes #
+#############################################################
+all_success="yes"
+for ip in ${ips_pi}; do
+    execute_on_pi "${ip}" '
+    # Change default password on the pi user
+    printf "\nChanging password for the pi user ...\n"
+    echo "pi:'${pi_password}'" | sudo chpasswd
+
+    # Add new users
+    usernames="'"${usernames}"'"
+    passwords="'"${passwords}"'"
+    for ((i = 1; i <= '${N_new_users}'; i += 1)); do
+        username="$(echo "${usernames}" | sed "${i}q;d")"
+        password="$(echo "${passwords}" | sed "${i}q;d")"
+        printf "\nAdding user '${esc_bold}'${username}'${esc_normal}' ...\n"
+        sudo adduser --disabled-password --gecos "" "${username}"
+        echo "${username}:${password}" | sudo chpasswd
+    done
+
+    # Logout
+    printf "\t\n"  # The tab signals succcess
+    sleep 1
+    exit 0
+    '
+    if [ "${pi_success}" == "no" ]; then
+        all_success="no"
+    fi
+done
+
+
+
+########
+# Exit #
+########
+if [ "${all_success}" == "yes" ]; then
+    printf "\n${esc_bold}${esc_green}Succesfully changed password for the pi user${esc_normal}\n"
+    if [ ${N_new_users} -lt 0 ]; then
+        printf "${esc_bold}${esc_green}and added ${N_new_users} new users${esc_normal}"
+    fi
+    printf "${esc_bold}${esc_green}to all Raspberry Pi's on the local network.${esc_normal}\n"
+else
+    printf "\nDone changing password for the pi user\n"
+    if [ ${N_new_users} -lt 0 ]; then
+        printf "and adding ${N_new_users} new users"
+    fi
+    printf "to all Raspberry Pi's on the local network.\n"
+    error "Note that some errors did occur"
+    exit 1
+fi
+
+# Exit gracefully
+trap : 0
+

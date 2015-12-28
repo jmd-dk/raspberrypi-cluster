@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+
+# This script combines the following:
+# - Download the latest Raspbian and write it to an SD card
+# After the SD card has been inserted into a raspberry pi:
+# - Update and configure the system
+# - Install additional software (MPI, ?)
+# - Make an image of the SD card and copy it to other SD cards
+# - Give all raspberry pi's a unique hostname and a static IP address
+# - Change the pi password and add additional users
+
+
+
+#################
+# Initial setup #
+#################
+export ppid=${PPID} start_msg="sets up a Raspberry Pi cluster on the local network"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/environment"
+
+
+
+##################
+# Locate SD card #
+##################
+locate_SD_device  # Now, ${disk} is the SD card device
+
+
+
+###########################################################
+# Download the latest Raspbian and write it to an SD card #
+###########################################################
+"${this_dir}/raspbian" "${disk}"
+
+
+
+##########################################
+# Get the IP address of the Raspberry Pi #
+##########################################
+# Ask the user to place the SD card into a Raspberry Pi
+echo "
+Place the SD card into a Raspberry Pi and connect it to the local network.
+You should not have other Raspberry Pi's connected to the local network."
+italic "With the SD card inserted into the only Raspberry Pi
+on the local network, press enter"
+read -t 0.1 -n 10000 discard || :
+key_pressed=" "
+while [ -n "${key_pressed}" ]; do
+    read -rs -n 1 key_pressed
+done
+echo
+# Wait for Raspbian to boot
+echo "
+Will now locate the Raspberry Pi on the local network ..."
+sleep 10
+# Locate the Raspberry Pi over the network
+"${this_dir}/locate" | tee "locate_output"
+if [ ${PIPESTATUS[0]} != 0 ]; then
+    trap : 0
+    exit 1
+fi
+ips=""
+while read line; do
+    if echo "${line}" | grep -i "succesfully" >/dev/null 2>&1; then
+        break
+    fi
+    if [ -z "${ips}" ]; then
+        ips=${line}
+    else
+        ips="$(printf "${ips}\n${line}")"
+    fi
+done <<< "$(tac "locate_output")"
+N_devices="$(echo "${ips}" | wc -l)"
+if [ ${N_devices} -gt 1 ]; then
+    echo "
+Warning: Detected ${N_devices} Raspberry Pi's on the network."
+fi
+ip="$(echo "${ips}" | tail -n 1)"
+printf "\nThe following Raspberry Pi will be used to setup the system:\n"
+printf "${esc_bold}${ip}${esc_normal}\n"
+echo "The SD card in this Raspberry Pi will then be cloned to the other
+Raspberry Pi's in the cluster."
+sleep 5
+
+
+
+#################################
+# Configure the Raspbian system #
+#################################
+"${this_dir}/configure" "--accurate" "${ip}"
+
+
+
+###############################
+# Install additional software #
+###############################
+"${this_dir}/software" "--accurate" "${ip}"
+
+
+
+#######################################
+# Clone the SD card to other SD cards #
+#######################################
+# Shutdown the Raspberry Pi so that the SD card can be safely removed
+printf "\nShutting down Rasberry Pi ${ip} so that
+the SD card can be safely removed and inserted back into the computer ...\n"
+execute_on_pi "${ip}" '
+printf "\nShutting down the Raspberry Pi ...\t\n"  # The tab signals succcess
+sleep 1
+sudo shutdown now
+'
+sleep 10
+printf "\nYou may now safely power off the Raspberry Pi and take out the SD card.\n"
+# Ask the user to insert the SD card back into the computer
+echo "
+You should now take the SD card from the Raspberry Pi
+and insert it back into the computer"
+italic "With the SD card inserted into the computer, press enter"
+read -t 0.1 -n 10000 discard || :
+key_pressed=" "
+while [ -n "${key_pressed}" ]; do
+    read -rs -n 1 key_pressed
+done
+echo
+# Clone the SD card
+"${this_dir}/clone" "${disk}"
+
+
+
+####################################################################
+# Give each Raspberry Pi a unique hostname and a static IP address #
+####################################################################
+# Ask the user to connect all Raspberry Pi's to the local network
+echo "
+All Raspberry Pi's now need to be connected to the local network."
+italic "With all Raspberry Pi's connected to the local network, press enter"
+read -t 0.1 -n 10000 discard || :
+key_pressed=" "
+while [ -n "${key_pressed}" ]; do
+    read -rs -n 1 key_pressed
+done
+echo "
+Will now scan through the local network to locate all Raspberry Pi's ..."
+# Apply the changes
+"${this_dir}/static_ip" "--accurate" | tee "static_ip_output"
+# Retrieve the static IP addresses from the saved output
+static_ips="$(grep "$(printf "${esc_rightarrow}")" "static_ip_output" | awk '{print $3}' | grep -o '[[:digit:]\.]*' | awk 'length($0) > 1')"
+
+
+
+################################
+# Create and exchange ssh keys #
+################################
+"${this_dir}/ssh_keys" "--accurate" "${static_ips}"
+
+
+
+###################################################
+# Change the pi password and add additional users #
+###################################################
+"${this_dir}/users" "--accurate" "${static_ips}"
+
+
+
+########
+# Exit #
+########
+printf "\n${esc_bold}${esc_green}Raspberry Pi cluster succesfully installed${esc_normal}\n"
+
+# Exit gracefully
+trap : 0
+

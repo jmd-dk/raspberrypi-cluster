@@ -1,0 +1,564 @@
+#!/usr/bin/env bash
+
+# This script should not be called manually.
+
+# This script does the setup for all other Raspberry Pi scripts.
+# At the beginning of each script, source this script like this:
+# export ppid=${PPID} start_msg="Type a starting message"
+# source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/environment"
+
+
+
+#################
+# Initial setup #
+#################
+# Set up error trapping
+ctrl_c()
+{
+    # Kill background processes silently
+    if [ -n "${pids_kill}" ]; then
+        for pid in ${pids_kill}; do
+            exec 3>&2; exec 2> /dev/null; kill -SIGKILL ${pid} >/dev/null 2>&1 || :; sleep 0.1; exec 2>&3; exec 3>&-
+        done
+    fi
+    kill -- -$$ > /dev/null 2>&1 || :
+    exit 2
+}
+abort()
+{
+    printf "${esc_bold}${esc_red}An error occured${esc_normal}\n"
+    # Kill background processes silently
+    if [ -n "${pids_kill}" ]; then
+        for pid in ${pids_kill}; do
+            exec 3>&2; exec 2> /dev/null; kill -SIGKILL ${pid} >/dev/null 2>&1 || :; sleep 0.1; exec 2>&3; exec 3>&-
+        done
+    fi
+    kill -- -$$ > /dev/null 2>&1  || :
+    exit 1
+}
+trap 'ctrl_c' SIGINT
+trap 'abort' EXIT
+set -e
+
+# ANSI/VT100 escape sequences
+esc="\x1b"
+esc_normal="${esc}[0m"
+esc_bold="${esc}[1m"
+esc_italic="${esc}[3m"
+esc_underline="${esc}[4m"
+esc_red="${esc}[91m"
+esc_green="${esc}[92m"
+esc_yellow="${esc}[93m"
+esc_up="${esc}[1A"
+esc_erase="${esc}[K"
+esc_save="${esc}[s"
+esc_restore="${esc}[u"
+
+# 3-byte equivalents of UTF-8 characters
+esc_rightarrow="\xE2\x86\x92"
+
+# Function which prints the Raspberry Pi logo in the terminal
+print_logo()
+{
+    # Define three new colors
+    printf "${esc}]4;16;rgb:bc/11/43${esc}\\"  # Pink
+    printf "${esc}]4;17;rgb:75/a9/28${esc}\\"  # Green
+    printf "${esc}]4;18;rgb:00/00/00${esc}\\"  # Black
+    local p="${esc}[48;5;16m  "  # Pink
+    local g="${esc}[48;5;17m  "  # Green
+    local b="${esc}[48;5;18m  "  # Black
+    # Print the logo
+    printf "      ${b}${b}${b}${esc_normal}          ${b}${b}${b}${esc_normal}
+  ${b}${g}${g}${g}${g}${g}${b}${esc_normal}  ${b}${g}${g}${g}${g}${g}${b}${esc_normal}
+  ${g}${g}${b}${g}${g}${g}${g}${esc_normal}  ${g}${g}${g}${g}${b}${g}${g}${esc_normal}
+  ${b}${g}${g}${g}${b}${g}${g}${b}${g}${g}${b}${g}${g}${g}${b}${esc_normal}
+  ${b}${g}${g}${g}${g}${b}${b}${b}${b}${b}${g}${g}${g}${g}${b}${esc_normal}
+    ${b}${g}${g}${g}${g}${b}${b}${b}${g}${g}${g}${g}${b}${esc_normal}
+      ${b}${b}${b}${b}${p}${p}${p}${b}${b}${b}${b}${esc_normal}
+    ${b}${p}${p}${b}${p}${p}${p}${p}${p}${b}${p}${p}${b}${esc_normal}
+    ${p}${p}${b}${b}${b}${p}${p}${p}${b}${b}${b}${p}${p}${esc_normal}
+    ${p}${b}${b}${p}${p}${b}${b}${b}${p}${p}${b}${b}${p}${esc_normal}
+  ${b}${b}${b}${p}${p}${p}${p}${b}${p}${p}${p}${p}${b}${b}${b}${esc_normal}
+${b}${p}${b}${p}${p}${p}${p}${p}${b}${p}${p}${p}${p}${p}${b}${p}${b}${esc_normal}
+${b}${p}${b}${p}${p}${p}${p}${p}${b}${p}${p}${p}${p}${p}${b}${p}${b}${esc_normal}
+${b}${p}${b}${b}${p}${p}${p}${b}${b}${b}${p}${p}${p}${b}${b}${p}${b}${esc_normal}
+${b}${p}${b}${b}${b}${b}${b}${p}${p}${p}${b}${b}${b}${b}${b}${p}${b}${esc_normal}
+  ${b}${p}${p}${b}${b}${p}${p}${p}${p}${p}${b}${b}${p}${p}${b}${esc_normal}
+  ${b}${p}${p}${p}${b}${p}${p}${p}${p}${p}${b}${p}${p}${p}${b}${esc_normal}
+    ${p}${p}${p}${p}${b}${p}${p}${p}${b}${p}${p}${p}${p}${esc_normal}
+    ${b}${p}${p}${p}${b}${b}${b}${b}${b}${p}${p}${p}${b}${esc_normal}
+      ${b}${b}${b}${p}${p}${p}${p}${p}${b}${b}${b}${esc_normal}
+          ${b}${p}${p}${p}${p}${p}${b}${esc_normal}
+              ${b}${b}${b}${esc_normal}\n"
+}
+
+# Function for printing out error messages
+error()
+{
+    printf "${esc_bold}${esc_red}${1}${esc_normal}\n" >&2
+}
+
+italic()
+{
+    printf "${esc_italic}$*${esc_normal}"
+}
+
+# Function which logs in to the Raspberry Pi with IP
+# and executes te commands given by the first argument.
+execute_on_pi()
+{
+    # Arguments
+    local ip="${1}"
+    local cmd="${2}"
+    # User information to use
+    username="pi"
+    password="raspberry"
+    # Standard messages
+    login_msg="Now logged into Raspberry Pi ${ip}\n"
+    logout_msg="Logged back out of Raspberry Pi ${ip}\n"
+    # Print login message and Raspberry Pi logo right before login
+    echo "
+Logging into Raspberry Pi ${ip} ..."
+    print_logo 
+    sshpass -p "${password}" ssh -p 22 -o ConnectTimeout=60 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${username}@${ip}" "
+set -e  # Any error should cause immediate logout
+printf \"${login_msg}\"
+${cmd}
+set +e" 2>&1 | tee "${ip}_output"
+    # Print logout message and Raspberry Pi logo (upside down) right after logout
+    print_logo | tac
+    printf "${logout_msg}"
+    execute_on_pi_success="yes"
+    if ! tail -n 2 "${ip}_output" | grep -P '\t' >/dev/null 2>&1; then
+        # An error occured
+        error "Something went wrong while logged into Raspberry Pi ${ip}."
+        error "Check out \"${workdir}/${ip}_output\" for error messages."
+        execute_on_pi_success="no"
+    fi
+}
+
+# Function which sleeps until the Raspberry Pi with
+# IP address ${ip} appears on the local network
+wait_pi_online()
+{
+    local ip="${1}"
+    echo "
+Waiting for Raspberry Pi ${ip} to reappear on the local network ..."
+    # The wait loop
+    wait_pi_online_success="no"
+    for i in {120..1}; do
+        nmap_output="$(nmap -p 22 --open ${ip})"
+        if echo "${nmap_output}" | grep "22.* open.* ssh" >/dev/null 2>&1; then
+            # Raspberry Pi back online
+            echo "Raspberry Pi ${ip} is now back on the local network"
+            wait_pi_online_success="yes"
+            break
+        fi
+        if [ ${i} == 1 ]; then
+            # Raspberry Pi never came back online
+            error "Raspberry Pi ${ip} did not reappear on the local network after reboot.
+Either the Raspberry Pi was given a different IP address (you should have
+configured a static IP address for your Raspberry Pi's before running this
+script) or the operations above corrupted the filesystem on the Raspberry Pi."
+        fi
+        sleep 10
+    done
+}
+
+
+############################################
+# Function for locating the SD card device #
+############################################
+locate_SD_device()
+{
+    # This function takes no input arguments.
+    # The output is the global variable ${disk}
+
+    # Make sure that the SD is removed
+    echo "
+If you have already inserted the SD card into the computer,
+please remove it again."
+    italic "With the SD card removed from the computer, press enter"
+    read -t 0.1 -n 10000 discard || :
+    key_pressed=" "
+    while [ -n "${key_pressed}" ]; do
+        read -rs -n 1 key_pressed
+    done
+    echo
+
+    # Record devices in /dev
+    sleep 2
+    ls -1 /dev > dev_without_SD
+
+    # Insert the SD card
+    echo
+    italic "Now insert the SD card into the computer\n"
+
+    # Record devices in /dev again and compare in order to locate SD
+    user_response_time=60
+    printf "    (Will continue to manual device specification in ${esc_save}${user_response_time})\n"
+    for i in $(eval echo "{${user_response_time}..0}"); do
+        # Break out when the time is up
+        if [ ${i} == 0 ]; then
+            break
+        fi
+        # Compare current /dev with the pre-SD record
+        ls -1 /dev > dev_with_SD
+        disk="$(diff dev_without_SD dev_with_SD | grep -o "> sd[[:alpha:]]" | awk '{print $2}' | uniq)"
+        N_disks="$(echo "${disk}" | wc -w)"
+        printf "${esc_restore}${esc_up}"
+        printf "${i}) \n"
+        # Break out when the SD card has been detected
+        if [ -n "${disk}" ]; then
+            break
+        fi
+        sleep 1
+    done
+    printf "${esc_up}${esc_erase}\n"
+
+    # Ask the user for confirmation
+    if [ ${N_disks} -gt 1 ]; then
+        # Detected sevaral new disks
+        echo "Found ${N_disks} candidates for the SD card device:"
+        for d in ${disk}; do
+            d_size="$(lsblk -o NAME,SIZE | grep "${d} " | awk '{print $2}')"
+            if [ -z "${d_size}" ]; then
+                d_size="${esc_bold}${esc_red}could not detect size!${esc_normal}"
+            fi 
+            printf "    ${d} (${d_size})\n"
+        done
+        while [ ${N_disks} -gt 1 ]; do
+            read -t 0.1 -n 10000 discard || :
+            printf "${esc_italic}Which is it? ${esc_normal}"
+            read disk_selected
+            for d in ${disk}; do
+                if [ -n " ${disk_selected} " ] && [ "${d}" == "${disk_selected}" ]; then
+                    read -t 0.1 -n 10000 discard || :
+                    italic "Are you absolutely sure that ${esc_bold}${disk_selected}${esc_normal}"
+                    italic " is the SD card?"
+                    printf " [y/N] "
+                    read yn
+                    case "${yn}" in
+                        [Yy]* ) disk="${d}"; break;;
+                        [Nn]* )              break;;
+                        ""    )              break;;
+                        *     )              break;;
+                    esac
+                fi
+            done
+            N_disks="$(echo "${disk}" | wc -l)"
+        done
+    elif [ -n "${disk}" ]; then
+        # Detected exactly one new disk
+        disk_size="$(lsblk -o NAME,SIZE | grep "${disk} " | awk '{print $2}')"
+        echo "Found the SD card device: ${disk} (${disk_size})"
+        read -t 0.1 -n 10000 discard || :
+        italic "Are you absolutely sure that ${esc_bold}${disk}${esc_normal}"
+        italic " is the SD card?"
+        printf " [y/N] "
+        read yn
+            case "${yn}" in
+            [Yy]* ) ;;
+            [Nn]* ) echo "Exiting"; exit 1;;
+            ""    ) echo "Exiting"; exit 1;;
+            *     ) echo "Exiting"; exit 1;;
+        esac
+        sleep 2
+    else
+        # Detected no new disks. Prompt for manual specification
+        echo "Failed to auto detect SD card."
+        read -t 0.1 -n 10000 discard || :
+        italic "Specify the SD card device (e.g. sdb): "
+        disk=""
+        while [ -z "${disk}" ]; do
+            read disk
+        done
+        # Check that device exist
+        if ! lsblk -o NAME | grep "${disk}" > /dev/null; then
+            error "Could not find device ${esc_bold}${disk}"
+            trap : 0
+            exit 1
+        fi
+        # Write out confirmation of manual specification
+        disk_size="$(lsblk -o NAME,SIZE | grep "${disk} " | awk '{print $2}')"
+        echo "SD card device specified: ${disk} (${disk_size})"
+        sleep 1
+    fi
+
+    # If sda is chosen issue a warning
+    if [ "${disk}" == "sda" ]; then
+        error "
+Warning:"
+        printf "You have specified ${esc_bold}${disk}${esc_normal} as the SD card,
+but this is normally the primary hard disk drive!\n"
+        italic "Are you absolutely sure that ${esc_bold}${disk}"
+        italic " is the SD card?"
+        printf " [y/N] "
+        read yn
+        case "${yn}" in
+        [Yy]* ) ;;
+        [Nn]* ) echo "Exiting"; trap : 0; exit 1;;
+        ""    ) echo "Exiting"; trap : 0; exit 1;;
+        *     ) echo "Exiting"; trap : 0; exit 1;;
+        esac
+        echo "
+Let me ask you again:"
+        italic "Are you ${esc_bold}${esc_underline}ABSOLUTELY"
+        italic " sure that ${esc_bold}${disk}"
+        italic " is the SD card?"
+        printf " [y/N] "
+        read yn
+        case "${yn}" in
+        [Yy]* ) ;;
+        [Nn]* ) echo "Exiting"; trap : 0; exit 1;;
+        ""    ) echo "Exiting"; trap : 0; exit 1;;
+        *     ) echo "Exiting"; trap : 0; exit 1;;
+        esac
+    fi
+}
+
+
+
+#################################################
+# Functions for reading from/writing to SD card #
+#################################################
+SD()
+{
+    # To write to the SD card, call this function e.g. like so:
+    #     SD "w" "sdb" "/path/to/image_file"
+    #     SD "w" "sdb" "/path/to/image_file" 663e72d7ce1f3c6e155d3d0aad10a28f546f9d74  # Last argument is an optional sha1sum
+    # To read the SD card into an image file, call this function e.g. like so:
+    #     SD "r" "sdb" "/path/to/image_file" 4294967296
+
+    # Input arguments
+    operation="${1}"       # Should be 'r' (read) or 'w' (write)
+    disk="${2}"            # The device name (e.g. sdb)
+    image_filename="${3}"  # Path to the image file
+    if [ "${operation}" == "r" ]; then
+        image_size="${4}"  # The nr. of bytes of the SD card which should be read
+    else
+        image_size="$(stat -c %s "${image_filename}")"
+    fi
+    image_sha1_verified="no"
+    if [ "${operation}" == "w" ]; then
+        sha1_image="${4}"
+        if [ -n "${sha1_image}" ]; then
+            image_sha1_verified="yes"
+        fi
+    fi
+    if [ "${operation}" != "r" ] && [ "${operation}" != "w" ]; then
+        error "The first argument to 'SD' should be either 'r' or 'w'"
+        exit 1
+    fi
+
+    # Unmount partitions on SD card
+    printf "\nUnmounting SD card ...\n"
+    partitions="$(lsblk -o NAME | grep -o "${disk}[[:digit:]]" || :)"
+    for p in ${partitions}; do
+        umount "/dev/${p}" 2> /dev/null || :
+    done
+
+    # Check whether the SD card is locked
+    if [ "${operation}" == "w" ]; then
+        read_only="$(lsblk -o NAME,RO | grep "${disk} " | awk '{print $2}')"
+        if [ ${read_only} == 1 ]; then
+            error "\nThe SD card appears to be locked"
+            echo "Please remove the SD card from the computer and unlock it."
+            echo "Then run this script again."
+            exit 1
+        fi
+    fi
+
+    # The maximum allowed block size
+    ((block_size_max = 2**24))  # 2**24 B = 16 MiB
+    # The image_size should be a multiplum of block_size_max
+    if [ "${operation}" == "r" ]; then
+        ((image_size += block_size_max - (image_size % block_size_max)))
+    fi
+    # Set initial block size
+    block_size=1
+    ((remainder = image_size % block_size)) || :
+    while [ ${remainder} == 0 ]; do
+        ((block_size *= 2))
+        ((remainder = image_size % block_size)) || :
+    done
+    ((block_size /= 2)) || :
+    if [ ${block_size} -gt ${block_size_max} ]; then
+        block_size=${block_size_max}
+    fi
+    # Number of blocks in image
+    ((count = image_size/block_size))
+
+    # Function for halving the block size
+    halve_block_size()
+    {
+        if [ ${block_size} == 1 ]; then
+            # Already tried a block size of 1
+            error "Attempted to lower the block size below 1 byte."
+            trap : 0
+            exit 1
+        fi
+        ((block_size /= 2))
+        ((count *= 2))
+    }
+
+    # Function for reading from/writing to the SD card
+    rw()
+    {
+        local exit_status=1
+        while [ ${exit_status} != 0 ]; do
+            exit_status=0
+            if [ "${operation}" == "r" ]; then
+                printf "\nReading SD card data to image file \"${image_filename}\" (block size: ${block_size}) ...\n"
+                sudo dd if="/dev/${disk}" bs=${block_size} count=${count} 2> "dd_in_err" | pv --size ${image_size} | dd of="${image_filename}" bs=${block_size} iflag=fullblock 2> "dd_out_err" || exit_status=1
+            else
+                printf "\nWriting image file \"${image_filename}\" to SD card (block size: ${block_size}) ...\n"
+                dd if="${image_filename}" bs=${block_size} 2> "dd_in_err" | pv --size ${image_size} | sudo dd of="/dev/${disk}" bs=${block_size} iflag=fullblock 2> "dd_out_err" || exit_status=1
+            fi
+            # Flush the write cache
+            printf "\nFlushing write cache ...\n"
+            sudo sync
+            if [ ${exit_status} != 0 ]; then
+                # Read/write failed. Try again.
+                if [ "${operation}" == "r" ]; then
+                    error "Error while reading from the SD card."
+                else
+                    error "Error while writing to SD card."
+                fi
+                echo "You may find error messages in \"${workdir}/dd_in_err\" and \"${workdir}/dd_out_err\"."
+                echo "Will try again at half the block size."
+                halve_block_size
+            fi
+        done
+    }
+
+    # Read from/write to the SD card
+    rw
+
+    # Compute and compare sha1sums
+    while :; do  # This will continue until succes or a write with a block size of 1 fails
+        if [ "${operation}" == "r" ]; then
+            printf "\nChecking integrity of written image file ...\n"
+        else
+            printf "\nChecking integrity of written SD card data ...\n"
+        fi
+        # Compute sha1 of image file
+        if [ "${image_sha1_verified}" == "no" ]; then
+            sha1_image="$(dd bs=${block_size} if="${image_filename}" 2> dd_err | pv --size ${image_size} | sha1sum | awk '{print $1}')"
+        fi
+        # Compute sha1 of SD
+        sha1_sd="$(sudo dd bs=${block_size} count=${count} if="/dev/${disk}" 2> dd_err | pv --size ${image_size} | sha1sum | awk '{print $1}')"
+        # Compare sha1sums
+        if [ "${sha1_image}" == "${sha1_sd}" ]; then
+            if [ "${operation}" == "r" ]; then
+                echo "Contents of image file verified"
+            else
+                echo "SD data verified"
+            fi
+            break
+        else
+            # Verification failed
+            if [ "${operation}" == "r" ]; then
+                error "Image file verification failed!"
+            else
+                error "SD data verification failed!"
+            fi
+            echo "SD sha1:    ${sha1_sd}"
+            echo "Image sha1: ${sha1_image}"
+            echo "You may find error messages in \"${workdir}/dd_err\"."
+            # Re-compute sha1 of image, until the same sha1 occurs twice
+            if [ "${image_sha1_verified}" == "no" ]; then
+                printf "\nChecking integrity of image sha1 ...\n"
+                sha1_image_list="${sha1_image}"
+                for j in {10..1}; do
+                    sha1_image="$(dd bs=${block_size} if="${image_filename}" 2> dd_err | pv --size ${image_size} | sha1sum | awk '{print $1}')"
+                    if echo "${sha1_image_list}" | grep -w "${sha1_image}" > /dev/null; then
+                        # Image sha1 verified
+                        echo "Integrity of image sha1 verified"
+                        image_sha1_verified="yes"
+                        break
+                    else
+                        # Add new sha1_image to the list
+                        sha1_image_list="$(printf "${sha1_image_list}\n${sha1_image}")"
+                        # If this is the last try, exit with an error
+                        if [ ${j} == 1 ]; then
+                            error "Giving up computing correct sha1 for \"${image_filename}\""
+                            exit 1
+                        fi
+                    fi
+                done
+            fi
+            # Compare sh1sums
+            if [ "${sha1_image}" == "${sha1_sd}" ]; then
+                if [ "${operation}" == "r" ]; then
+                    echo "Contents of image file verified"
+                else
+                    echo "SD data verified"
+                fi
+                break
+            else
+                # sha1 of image correct, but it disagrees with SD sha1
+                echo "Redo sha1 computation for SD card data, using a halved block size ..."
+                halve_block_size
+                sha1_sd2="$(sudo dd if=/dev/${disk} bs=${block_size} count=${count} 2> dd_err | pv --size ${image_size} | sha1sum | awk '{print $1}')"
+                if [ "${sha1_sd}" == "${sha1_sd2}" ]; then
+                    # Initial SD sha1 correct. Rewrite data.
+                    if [ "${operation}" == "r" ]; then
+                        echo "Corrupt image file."
+                        echo "Will try cloning the SD card to the image file again, using a halved block size."
+                    else
+                        echo "Corrupt data on SD card."
+                        echo "Will try writing the image to the SD card again, using a halved block size."
+                    fi
+                    rw
+                elif [ "${sha1_image}" == "${sha1_sd2}" ]; then
+                    # Initial check incorrect, SD data is really all right
+                    echo "SD sha1 (second computation): ${sha1_sd2}"
+                    echo "Something went wrong with the initial sha1 computation;"
+                    echo "the SD data actually matches the image file!"
+                    break
+                else
+                    # Unstable checksum computation
+                    echo "SD sha1 (second computation): ${sha1_sd2}"
+                    echo "Checksum computation for the SD data is unstable."
+                    echo "This can e.g. be due to bad sectors on the SD card."
+                    if [ "${operation}" == "w" ]; then
+                        echo "Will try writing the image to the SD card again, using a halved block size."
+                        rw
+                    fi
+                fi
+            fi
+        fi
+    done
+}
+
+
+
+#####################
+# Do initialization #
+#####################
+# Startup message
+if [ -n "${start_msg}" ] && [ -z $(ps ${ppid} | tail -n 1 | awk '{print $6}') ]; then
+    # Script run directly
+    printf "${esc_bold}${esc_yellow}This script ${start_msg}${esc_normal}\n"
+else
+    # Script invoked by another script
+    printf "\n${start_msg^}\n"
+fi
+
+# Change working directory if being sourced
+this_file="$(readlink -f "${BASH_SOURCE[0]}")"
+this_dir="$(dirname "${this_file}")"
+workdir="${this_dir}/tmp"
+if [ -n "${BASH_SOURCE[1]}" ]; then
+    # This script is being sourced.
+    # Change ${this_file} into the filename of the script doing the sourcing.
+    this_file="$(readlink -f ${BASH_SOURCE[1]})"
+    # Make temporary working directory and go to this directory
+    mkdir -p "${workdir}"
+    cd "${workdir}"
+else
+    # Not being sourced from another script. Disable error trapping.
+    set +e    
+fi
+

@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+
+# This script will configure all Raspberry Pi's on the local network,
+# using settings fitting for the Raspberry Pi 2.
+
+
+#################
+# Initial setup #
+#################
+export ppid=${PPID} start_msg="configures all Raspberry Pi's on the local network,
+using settings fitting for the Raspberry Pi 2"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/environment"
+
+
+
+###################
+# Input arguments #
+###################
+# A list of IP addresses may be given as an argument
+ips="${1}"
+
+
+
+##################################################
+# Locate all Raspberry Pi's on the local network #
+##################################################
+if [ -z "${ips}" ]; then
+    "${this_dir}/locate" | tee "locate_output"
+    if [ ${PIPESTATUS[0]} != 0 ]; then
+        trap : 0
+        exit 1
+    fi
+    while read line; do
+        if echo "${line}" | grep -i "succesfully" >/dev/null 2>&1; then
+            break
+        fi
+        if [ -z "${ips}" ]; then
+            ips=${line}
+        else
+            ips="$(printf "${ips}\n${line}")"
+        fi
+    done <<< "$(tac "locate_output")"
+fi
+N_devices="$(echo "${ips}" | wc -l)"
+if [ ${N_devices} == 1 ]; then
+    echo "
+The following Raspberry Pi will be configured:"
+else
+    echo "
+The following ${N_devices} Raspberry Pi's will be configured:"
+fi
+printf "${esc_bold}${ips}${esc_normal}\n"
+sleep 5
+
+
+
+################################################################
+# Loop over each located Raspberry Pi and do the configuration #
+################################################################
+n_ip=0
+all_success="yes"
+for ip in ${ips}; do
+    ((n_ip += 1))
+    
+    # Do all tasks which do not require (much) extra disk space
+    # and which require a reboot:
+    # - Update package lists
+    # - Update raspi-config
+    # - Expand the filesystem
+    # - Change boot option to "console"
+    # - Apply overclock preset "Pi2"
+    # - Increase overvoltage
+    # - Split the memory so that the CPU receive as big a chunk as possible
+    # - Force the use of the MMC driver for the SD card
+    # - Reboot
+    execute_on_pi "${ip}" '
+    # Update package lists
+    printf "\nUpdating package lists ...\n"
+    sudo apt-get update
+
+    # Update raspi-config
+    printf "\nUpdating raspi-config ...\n"
+    sudo apt-get -y install raspi-config
+    sleep 5
+
+    # Make a modified version of the raspi-config script
+    printf "\nMaking modified version of raspi-config ...\n"
+    raspi_config="$(whereis raspi-config | awk "{print \$2}")"
+    cp "${raspi_config}" .
+    # Creating entrance for Boot options --> Console
+    sed -i "/--memory-split)/i\ \ --boot-console)\n\ \ \ \ INTERACTIVE=False\n\ \ \ \ do_boot_behaviour_new B1\n\ \ \ \ exit 0\n\ \ \ \ ;;" "./raspi-config"
+    # Creating entrance for Overclock --> Pi2
+    sed -i "/--memory-split)/i\ \ --overclock-pi2)\n\ \ \ \ INTERACTIVE=False\n\ \ \ \ do_overclock Pi2\n\ \ \ \ exit 0\n\ \ \ \ ;;" "./raspi-config"
+    # Creating entrance for Advanced Options --> Memory Split --> 16
+    sed -i "/--memory-split)/i\ \ --memory-split-maxCPU)\n\ \ \ \ INTERACTIVE=False\n\ \ \ \ do_memory_split 16\n\ \ \ \ exit 0\n\ \ \ \ ;;" "./raspi-config"
+
+    # Expand the filesystem
+    printf "\nExpanding the filesystem ...\n"
+    sudo "./raspi-config" --expand-rootfs
+
+    # Change boot option to "console"
+    printf "\nChanging boot option to \"console\" mode ...\n"
+    sudo "./raspi-config" --boot-console
+
+    # Apply overclock preset "Pi2"
+    printf "\nOverclocking to preset \"Pi2\" ...\n"
+    sudo "./raspi-config" --overclock-pi2
+    
+    # Furhter increase the overvoltage, leading to better stability
+    printf "\nOvervolting by 0.1 V ...\n"
+    sudo sed -i "s/over_voltage=2/over_voltage=4/g"     "/boot/config.txt"
+    sudo sed -i "/over_voltage=4/aover_voltage_sdram=4" "/boot/config.txt"
+
+    # Split the memory so that the CPU receive as big a chunk as possible
+    printf "\nSplitting the memory between the CPU and the GPU,\ngiving the GPU as little as possible (16 MB) ...\n"
+    sudo "./raspi-config" --memory-split-maxCPU
+
+    # Force the use of the MMC driver for the SD card, for stability across kernels
+    printf "\nForce the use of the MMC driver ...\n"
+    sudo sed -i "/Additional\ overlays/adtoverlay=mmc" "/boot/config.txt"
+
+    # Remove the modified version of the raspi-config script
+    printf "\nRemoving the modified \"raspi-config\"\n"
+    rm -f "./raspi-config"
+
+    # Need to reboot
+    printf "\nRebooting the Raspberry Pi ...\t\n"  # The tab signals succcess
+    sleep 1
+    sudo shutdown -r now
+    '
+    # If not successful, skip the remaining tasks on this Raspberry Pi
+    if [ "${execute_on_pi_success}" == "no" ]; then
+        all_success="no"
+        if [ ${n_ip} -lt ${N_devices} ]; then
+            echo "Will now skip to the next Raspberry Pi ..."
+        fi
+        continue
+    fi
+
+    # Wait for the Raspberry Pi to boot up again
+    wait_pi_online "${ip}"
+    # If not successful, skip the remaining tasks on this Raspberry Pi
+    if [ "${wait_pi_online_success}" == "no" ]; then
+        all_success="no"
+        if [ ${n_ip} -lt ${N_devices} ]; then
+            echo "Will now skip to the next Raspberry Pi ..."
+        fi
+        continue
+    fi
+
+    # Do the follwing:
+    # - Update packages (and install new/remove old as necessary)
+    # - Update firmware
+    # - Reboot
+    execute_on_pi "${ip}" '
+    # Update packages
+    printf "\nUpdating packages ...\n"
+    sudo apt-get -y dist-upgrade
+
+    # Update firmware
+    printf "\nUpdating firmware ...\n"
+    sudo apt-get -y install rpi-update
+    sudo rpi-update
+
+    # Need to reboot
+    printf "\nRebooting the Raspberry Pi ...\t\n"  # The tab signals succcess
+    sleep 1
+    sudo shutdown -r now
+
+    # Log out of the Raspberry Pi
+    printf "\nLogging out of the Raspberry Pi ...\t\n"  # The tab signals succcess
+    sleep 1
+    exit 0
+    '
+    # If not successful, skip the remaining tasks on this Raspberry Pi
+    if [ "${execute_on_pi_success}" == "no" ]; then
+        all_success="no"
+        if [ ${n_ip} -lt ${N_devices} ]; then
+            echo "Will now skip to the next Raspberry Pi ..."
+        fi
+        continue
+    fi
+
+    # Wait for the Raspberry Pi to boot up again
+    wait_pi_online "${ip}"
+    if [ "${wait_pi_online_success}" == "no" ]; then
+        # If the Raspberry Pi do not reappear on the local network,
+        # it has not booted successfully and the configuration was a failure.
+        echo
+        error "Raspberry Pi ${ip} did not reappear on the local network."
+        error "This could signal a bad configuration,"
+        error "leaving the Raspberry Pi unable to boot."
+    else
+        # If the Raspberry Pi reappears on the local network,
+        # it has booted successfully and the configuration was a success.
+        echo
+        echo "Succesfully configured Raspberry Pi ${ip}"
+    fi
+done
+
+
+
+########
+# Exit #
+########
+if [ "${all_success}" == "yes" ]; then
+    printf "\n${esc_bold}${esc_green}Succesfully configured all Raspberry Pi's on the local network${esc_normal}\n"
+else
+    printf "\nDone configuring all Raspberry Pi's on the local network.\n"
+    error "Note that some errors did occur"
+    exit 1
+fi
+
+# Exit gracefully
+trap : 0
+

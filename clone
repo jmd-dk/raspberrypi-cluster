@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+
+# This script will clone an SD card to any number of additional SD cards
+
+
+
+#################
+# Initial setup #
+#################
+export ppid=${PPID} start_msg="clones an SD card to
+any number of additional SD cards"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/environment"
+
+
+
+###################
+# Input arguments #
+###################
+# The SD device may be given as the first argument
+disk="${1}"
+
+
+
+##################
+# Locate SD card #
+##################
+if [ -z "${disk}" ]; then
+    locate_SD_device  # Now, ${disk} is the SD card device
+fi
+
+
+
+##########################################################
+# Shrink second partition on SD card, note the partition #
+# ending and expand the partition back to normal         #
+##########################################################
+# Unmount partitions on SD card
+echo "
+Unmounting SD card ..."
+partitions="$(lsblk -o NAME | grep -o "${disk}[[:digit:]]" || :)"
+for p in ${partitions}; do
+    umount "/dev/${p}" 2> /dev/null || :
+done
+sleep 1
+# Get the starting block of the second partition
+echo "
+Analyzing /dev/${disk}2 ..."
+fdisk_output="$(sudo fdisk -l /dev/${disk})"
+start=$(echo "${fdisk_output}" | grep "/dev/sdb2" | awk '{print $2}')
+unit=$(echo "${fdisk_output}" | grep "Units" | grep -o '[[:digit:]]*' | head -n 1)
+((start *= unit))
+# Get size of second partition
+dumpe2fs_output="$(sudo dumpe2fs -h "/dev/${disk}2" 2>/dev/null)"
+block_count=$(echo "${dumpe2fs_output}" | grep "Block count" | awk '{print $NF}')
+block_size=$(echo "${dumpe2fs_output}" | grep "Block size" | awk '{print $NF}')
+((partition_size = block_count*block_size))
+# Check the filesystem on the second partition
+echo "
+Checking the filesystem on '/dev/${disk}2' ..."
+sudo fsck -f "/dev/${disk}2"
+# Shrink the filesystem on the second partition to the minimum size
+echo "
+Shrinking the filesystem on '/dev/${disk}2' ..."
+sudo resize2fs -M -p "/dev/${disk}2" | tee "resize2fs_output"
+# Get the size of the shrunken filesystem from the resize2fs command
+block_count_shrunken=$(grep "/dev/${disk}2" "resize2fs_output" | tail -n 1 | grep -o '[[:digit:]]*' | tail -n 1)
+((partition_size_shrunken = block_count_shrunken*block_size))
+# Get the last byte of the shrunken filesystem
+((image_size = start + partition_size_shrunken + 1))
+# Do consistency check
+block_count_shrunken_dumpe2fs=$(sudo dumpe2fs -h "/dev/${disk}2" 2>/dev/null | grep "Block count" | awk '{print $NF}')
+if [ ${block_count_shrunken} != ${block_count_shrunken_dumpe2fs} ]; then
+    error "The shrunken partition '/dev/${disk}2' is supposed to consist of
+${block_count_shrunken} blocks but dumpe2fs reports it to consist of ${block_count_shrunken_dumpe2fs} blocks."
+    exit 1
+fi
+# Check the filesystem on the second partition
+echo "
+Checking the filesystem on '/dev/${disk}2' ..."
+sudo fsck -f "/dev/${disk}2"
+# Expand the filesystem on the second partition back to normal
+echo "
+Re-expanding the filesystem on '/dev/${disk}2' ..."
+sudo resize2fs -p "/dev/${disk}2" ${block_count}
+# Do consistency check
+block_count_expanded=$(sudo dumpe2fs -h "/dev/${disk}2" 2>/dev/null | grep "Block count" | awk '{print $NF}')
+if [ ${block_count_expanded} != ${block_count} ]; then
+    error "The re-expanded partition '/dev/${disk}2' is supposed to consist of
+${block_count} blocks but dumpe2fs reports it to consist of ${block_count_expanded} blocks."
+    exit 1
+fi
+
+
+
+####################################
+# Clone SD card into an image file #
+####################################
+image_filename="${workdir}/SD_image.img"
+# Read SD card into image
+SD "r" "${disk}" "${image_filename}" ${image_size}
+printf "\nSuccessfully cloned the SD card into image \"${image_filename}\".\n"
+
+
+
+###############################
+# Write image to new SD cards #
+###############################
+i=0
+while :; do
+    # Ask the user whether to clone the image to another SD card
+    read -t 0.1 -n 10000 discard || :
+    echo
+    if [ ${i} == 0 ]; then
+        italic "Do you wish to write the image onto a new SD card?"
+    else
+        italic "Do you wish to write the image onto yet another SD card?"
+    fi
+    printf " [Y/n] "
+    read yn
+    case "${yn}" in
+        [Yy]* ) ;;
+        [Nn]* ) break;;
+        ""    ) ;;
+        *     ) ;;
+    esac
+    # Ask the user to insert a new SD card
+    printf "\nRemove the SD card from the computer and insert another SD card.
+The original SD card will then be cloned to the new SD card.\n"
+    italic "With the new SD card inserted, press enter"
+    read -t 0.1 -n 10000 discard || :
+    key_pressed=" "
+    while [ -n "${key_pressed}" ]; do
+        read -rs -n 1 key_pressed
+    done
+    sleep 2
+    # Write the image to the newly inserted SD card
+    if [ ${i} == 0 ]; then
+        SD "w" "${disk}" "${image_filename}"
+    else
+        SD "w" "${disk}" "${image_filename}" ${sha1_image}
+    fi
+    printf "\nSuccessfully cloned image \"${image_filename}\" to the SD card.\n"
+
+    ((i += 1))
+done
+
+
+
+########
+# Exit #
+########
+if [ ${i} == 0 ]; then
+    printf "
+${esc_bold}${esc_green}Succesfully cloned the SD card into the image file
+\"${image_filename}\".
+You may now remove the SD card from the computer.${esc_normal}
+"
+elif [ ${i} == 1 ]; then
+    printf "
+${esc_bold}${esc_green}Succesfully cloned the original SD card onto another SD card.
+You may now remove the SD card from the computer.${esc_normal}
+"
+else
+    printf "
+${esc_bold}${esc_green}Succesfully cloned the original SD card onto ${i} other SD cards.
+You may now remove the SD card from the computer.${esc_normal}
+"
+fi
+
+# Exit gracefully
+trap : 0
+

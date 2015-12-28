@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+
+# This script will locate all Raspberry Pi's connected to the local network,
+# which use the default Raspbian configurations.
+
+
+#################
+# Initial setup #
+#################
+export ppid=${PPID} start_msg="locates all Raspberry Pi's connected to the local network,
+which use the default Raspbian configurations"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/environment"
+
+
+
+###################
+# Input arguments #
+###################
+timing_template="-T3"
+ip_candidates=""
+for var in "${@}"; do
+    if [ "${var}" == "--accurate" ]; then
+        # The '--accurate' argument
+        timing_template="-T2"
+    elif [ -n "${var}" ]; then
+        # Assume ${var} to be a list of possible Raspberry Pi IP addresses
+        ip_candidates="$(echo "${ip_candidates} ${var}" | xargs)"
+    fi
+done
+
+
+
+#############################################################
+# Locate all devices on the local network with port 22 open #
+#############################################################
+# Function which checks the connection to the local network
+check_LAN_connection()
+{
+    connected_LAN="yes"
+    local_ip=$(hostname -I | awk '{print $1}')
+    if [ -z "${local_ip}" ]; then
+        error "
+You do not seem to be connected to a local network"
+        connected_LAN="no"
+    fi
+}
+# Function for locating IP addresses of devices
+# on the local network with port 22 open.
+locate_open_22()
+{
+    if [ -z "${ip_candidates}" ]; then
+        nmap_output="$(nmap -v ${timing_template} -p 22 --open ${local_ip%.*}.\* | grep -v --line-buffered "host down" | tee "/dev/tty")"
+    else
+        nmap_output="$(nmap -v ${timing_template} -p 22 --open ${ip_candidates}  | grep -v --line-buffered "host down" | tee "/dev/tty")"
+    fi
+    ips_22="$(echo "${nmap_output}" | awk '{print $NF}' | grep "${local_ip%.*}" | sort -u)"
+    N_devices="$(echo "${ips_22}" | wc -l)"
+    if [ -z "${ips_22}" ]; then
+        N_devices=0
+    fi
+}
+# Function which recognizes whether ${ip} is one of the standard router IP addresses
+may_be_router()
+{
+    python3 -c "print('yes' if '${ip}' in ('10.0.0.1',
+                                           '10.0.0.2',
+                                           '10.0.0.138',
+                                           '10.0.1.1',
+                                           '10.1.1.1',
+                                           '10.1.10.1',
+                                           '10.10.1.1',
+                                           '10.90.90.90',
+                                           '192.168.0.1',
+                                           '192.168.0.3',
+                                           '192.168.0.10',
+                                           '192.168.0.30',
+                                           '192.168.0.50',
+                                           '192.168.0.100',
+                                           '192.168.0.101',
+                                           '192.168.0.227',
+                                           '192.168.0.254',
+                                           '192.168.1.1',
+                                           '192.168.1.10',
+                                           '192.168.1.99',
+                                           '192.168.1.100',
+                                           '192.168.1.200',
+                                           '192.168.1.210',
+                                           '192.168.1.254',
+                                           '192.168.2.1',
+                                           '192.168.2.254',
+                                           '192.168.3.1',
+                                           '192.168.4.1',
+                                           '192.168.8.1',
+                                           '192.168.10.1',
+                                           '192.168.10.10',
+                                           '192.168.10.50',
+                                           '192.168.10.100',
+                                           '192.168.11.1',
+                                           '192.168.15.1',
+                                           '192.168.16.1',
+                                           '192.168.20.1',
+                                           '192.168.30.1',
+                                           '192.168.50.1',
+                                           '192.168.55.1',
+                                           '192.168.62.1',
+                                           '192.168.100.1',
+                                           '192.168.100.100',
+                                           '192.168.102.1',
+                                           '192.168.123.254',
+                                           '192.168.168.168',
+                                           '192.168.223.100',
+                                           '192.168.251.1',
+                                           '192.168.254.254',
+                                           '200.200.200.5',
+                                           )
+                            else 'no')"
+}
+
+# If not connected to a local network, exit
+check_LAN_connection
+if [ "${connected_LAN}" != "yes" ]; then
+    trap : 0
+    exit 1
+fi
+
+# Get IP addresses of devices on the local network with port 22 open
+echo "
+Searching for devices on the local network with port 22 open ..."
+locate_open_22
+if [ ${N_devices} == 0 ]; then
+    # No devices found with port 22 open.
+    # List all devices on the network and quit.
+    error "Could not find any devices with port 22 open"
+    echo "Searching for all devices on the local network ..."
+    nmap_output="$(nmap -v ${timing_template} -sn ${local_ip%.*}.\* | grep -v --line-buffered "host down" | tee "/dev/tty")"
+    for i in {10..1}; do
+        ips="$(echo "${nmap_output}" | awk '{print $NF}' | grep "${local_ip%.*}" | sort -u)"
+        N_devices="$(echo "${ips}" | wc -l)"
+        if [ ${N_devices} != 0 ]; then
+            # Some device(s) found
+            break
+        fi
+        if [ ${i} == 1 ]; then
+            # No devices found at all. Giving up
+            error "Could not find any devices at all"
+            exit 1
+        fi
+        sleep 10
+        echo "Searching for all devices on the local network ..."
+        nmap_output="$(nmap -v ${timing_template} -sn ${local_ip%.*}.\* | grep -v --line-buffered "host down" | tee "/dev/tty")"
+    done
+    # Print out gathered information about all devices on the network
+    if [ ${N_devices} == 1 ]; then
+        echo "Found the following device:"
+    else
+        echo "Found the following ${N_devices} devices:"
+        echo "${ips}"
+        echo "Information about each will now follow:"
+    fi
+    inside_block="no"
+    for ip in ${ips}; do
+        # Get information about the host with ip ${ip}
+        nmap_output="$(nmap ${ip})"
+        while read line; do
+            if [ "${inside_block}" == "no" ] && [ -n "$(echo "${line}" | grep "PORT *STATE *SERVICE")" ]; then
+                # Start of text block with information about device
+                printf "\n${esc_bold}${ip}${esc_normal}"
+                if [ ${ip} == ${local_ip} ]; then
+                   printf " (this machine)"
+                elif [ "$(may_be_router)" == "yes" ]; then
+                   printf " (may be your router)"
+                fi
+                printf "\n"
+                inside_block="yes"
+            elif [ "${inside_block}" == "yes" ]; then
+                if [ -n "${line}" ]; then
+                    # Inside text block
+                    echo "${line}"
+                    if echo "${line}" | grep "22.* open.* ssh" >/dev/null 2>&1; then
+                        # Device with open port 22 found
+                        if [ -z "${ips_22}" ]; then
+                            ips_22="${ip}"
+                        else
+                            ips_22="$(printf "${ips_22}\n${ip}")"
+                        fi
+                    fi
+                else
+                    # End of text block
+                    inside_block="no"
+                fi
+            fi
+        done <<< "${nmap_output}"
+    done
+
+    if [ -n "${ips_22}" ]; then
+        # Some device with an open port 22 has been found
+        if [ ${N_devices} == 1 ]; then
+            echo "
+The above device have port 22 open"
+        else
+            ips_22="$(echo "${ips_22}" | sort -u)"
+            N_devices="$(echo "${ips_22}" | wc -l)"
+            if [ ${N_devices} == 1 ]; then
+                echo "
+Of these, the following device has port 22 open:"
+            else
+                echo "
+Of these, the following ${N_devices} devices have port 22 open:"
+            fi
+        fi
+        echo "${ips_22}"
+    else
+        # Continue to seach for Raspberry Pi's
+        echo
+        for i in {60..1}; do
+            check_LAN_connection
+            echo "Searching for devices on the local network with port 22 open ..."
+            locate_open_22
+            if [ ${N_devices} -gt 0 ]; then
+                # Some device(s) with port 22 open found
+                if [ ${N_devices} == 1 ]; then
+                    echo "Found the following device:"
+                else
+                    echo "Found the following ${N_devices} devices:"
+                fi
+                echo "${ips_22}"
+                break
+            fi
+            if [ ${i} == 1 ]; then
+                # Definitely no Raspberry Pi's on the local network
+                # with the standard Rasbian configurations. Quit.
+                error "Giving up locating any devices on the local network with port 22 open"
+                trap : 0
+                exit 1
+            fi
+            sleep 10
+        done
+    fi
+else
+    # Some device(s) with port 22 open found
+    if [ ${N_devices} == 1 ]; then
+        echo "Found the following device:"
+    else
+        echo "Found the following ${N_devices} devices:"
+    fi
+    echo "${ips_22}"
+fi
+
+
+
+################################################################
+# Check whether some of the located devices are Raspberry Pi's #
+################################################################
+# User information to use
+username="pi"
+password="raspberry"
+# Attempt to SSH into each device to test whether they are Raspberry Pi's
+if [ ${N_devices} == 1 ]; then
+    echo "
+Checking whether the located device is a Raspberry Pi ..."
+else
+    echo "
+Checking whether the located devices are Raspberry Pi's ..."
+fi
+ips_raspberrypi=""
+for ip in ${ips_22}; do
+    remote_ip=$(sshpass -p ${password} ssh -p 22 -o ConnectTimeout=60 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${username}@${ip}" 'hostname -I' 2> /dev/null | awk '{print $1}')
+    if [ "${remote_ip}" == "${ip}" ]; then
+        # Raspberry Pi found
+        if [ -z "${ips_raspberrypi}" ]; then
+            ips_raspberrypi=${ip}
+        else
+            ips_raspberrypi="$(printf "${ips_raspberrypi}\n${ip}")"
+        fi
+    fi
+done
+
+# Print out results
+if [ -z "${ips_raspberrypi}" ]; then
+    # No Raspberry Pi's found
+    if [ ${N_devices} == 1 ]; then
+        error "
+The located device is not a Raspberry Pi
+(at least not one which uses the default Raspbian configurations)"
+    else
+        error "
+None of the located devices are Raspberry Pi's
+(at least not ones which use the default Raspbian configurations)"
+    fi
+    # Call this script recursively
+    if [ -z "${recursion_level}" ]; then
+        recursion_level=1
+    elif [ ${recursion_level} -lt 10 ]; then
+        ((recursion_level += 1))
+    else
+        # Reached recursion limit. Giving up.
+        error "
+Giving up locating Raspberry Pi's on the local network"
+        trap : 0
+        exit 1
+    fi
+    export recursion_level=${recursion_level}
+    trap : 0
+    #"${this_file}"
+    "/home/jeppe/Desktop/raspberrypi/scripts/locate"
+    exit $?
+else
+    # Raspberry Pi('s) located
+    N_devices="$(echo "${ips_raspberrypi}" | wc -l)"
+    if [ ${N_devices} == 1 ]; then
+    printf "
+${esc_bold}${esc_green}Succesfully identified the following device as a Raspberry Pi:${esc_normal}\n"
+    else
+    printf "
+${esc_bold}${esc_green}Succesfully identified the following ${N_devices} devices as Raspberry Pi's:${esc_normal}\n"
+    fi
+    echo "${ips_raspberrypi}"
+fi
+
+
+
+########
+# Exit #
+########
+# Exit gracefully
+trap : 0
+exit 0
+
