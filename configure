@@ -17,7 +17,16 @@ source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/environment"
 # Input arguments #
 ###################
 # A list of IP addresses may be given as an argument
-ips="${1}"
+ips=""
+for var in "${@}"; do
+    if [ "${var}" == "--accurate" ]; then
+        # The '--accurate' argument
+        timing_template="-T2"
+    elif [ -n "${var}" ]; then
+        # Assume ${var} to be a list of possible Raspberry Pi IP addresses
+        ips="$(echo "${ips} ${var}" | xargs)"
+    fi
+done
 
 
 
@@ -25,7 +34,7 @@ ips="${1}"
 # Locate all Raspberry Pi's on the local network #
 ##################################################
 if [ -z "${ips}" ]; then
-    "${this_dir}/locate" | tee "locate_output"
+    "${this_dir}/locate" "${@}" | tee "locate_output"
     if [ ${PIPESTATUS[0]} != 0 ]; then
         trap : 0
         exit 1
