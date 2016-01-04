@@ -73,7 +73,7 @@ for ip in ${ips_pi}; do
     mpi_dir="$(readlink -m "${mpi_dir}")"
     mkdir -p ~/"tmp/mpi"
     cd ~/"tmp/mpi"
-    wget -t 10 --timeout 15 -c --no-check-certificate "${mpi_url}" 2>/dev/nullt
+    wget -t 10 --timeout 15 -c --no-check-certificate "${mpi_url}" 2>/dev/null
     archive="$(ls -p | grep -v /)"
     gzip -d < "${archive}" | tar -ixvf -
     cd *
